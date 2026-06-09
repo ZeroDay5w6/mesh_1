@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Интерактивная Mesh-сеть LoRa</title>
+    
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        body { font-family: 'Inter', system_ui, sans-serif; }
+        
+        #map { height: 100%; width: 100%; }
+        
+        .leaflet-custom-marker {
+            width: 56px;
+            height: 56px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 15px;
+            color: white;
+            border: 4px solid white;
+            box-shadow: 0 8px 20px rgba(0,0,0,0.4),
+                        inset 0 2px 4px rgba(255,255,255,0.3);
+            text-shadow: 0 1px 2px rgba(0,0,0,0.6);
+        }
+        .repeater-marker { 
+            background: linear-gradient(135deg, #facc15, #ea580c); 
+        }
+        .companion-marker { 
+            background: linear-gradient(135deg, #4ade80, #15803d); 
+        }
+    </style>
+</head>
+<body class="bg-zinc-950 text-white">
+    <div class="max-w-screen-2xl mx-auto">
+        <div class="flex items-center justify-between border-b border-zinc-800 bg-zinc-900 px-8 py-5">
+            <div class="flex items-center gap-4">
+                <div class="w-10 h-10 bg-emerald-500 rounded-2xl flex items-center justify-center text-2xl">📡</div>
+                <div>
+                    <h1 class="text-3xl font-bold">Автономная LoRa Mesh-сеть</h1>
+                    <p class="text-emerald-400">Heltec V4 • T114 • MeshPocket</p>
+                </div>
+            </div>
+            
+            <div class="flex items-center gap-6">
+                <div class="flex bg-zinc-800 rounded-3xl p-1 text-sm font-medium">
+                    <button onclick="switchProtocol(0)" id="btn-meshtastic" 
+                            class="px-6 py-2.5 rounded-3xl active">Meshtastic</button>
+                    <button onclick="switchProtocol(1)" id="btn-meshcore" 
+                            class="px-6 py-2.5 rounded-3xl">MeshCore</button>
+                </div>
+
+                <button onclick="addNewNode()" 
+                        class="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-500 px-5 py-3 rounded-2xl text-sm font-semibold">
+                    <span class="text-xl">+</span> Добавить узел
+                </button>
+                <button onclick="resetAll()" 
+                        class="px-5 py-3 text-zinc-400 hover:text-white">⟳ Сбросить</button>
+            </div>
+        </div>
+
+        <div class="flex h-[calc(100vh-78px)]">
+            <div class="flex-1 relative" id="map-wrapper">
+                <div id="map"></div>
+            </div>
+
+            <div class="w-96 bg-zinc-900 border-l border-zinc-800 overflow-auto p-6">
+                <div id="node-info" class="hidden bg-zinc-800 rounded-3xl p-6 mb-6"></div>
+
+                <div class="text-xs text-zinc-400 mt-8">
+                    <p><strong>Управление:</strong></p>
+                    <ul class="space-y-1 mt-2">
+                        <li>• Перетаскивайте маркеры — расстояния обновляются</li>
+                        <li>• Клик по маркеру — информация</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let nodes = [
+            { id: 1, name: "V4-Repeater", type: "repeater", lat: 62.035, lng: 129.720, tx: "11 дБм", antenna: "3 дБи", role: "Repeater / ROUTER" },
+            { id: 2, name: "T114-1", type: "companion", lat: 62.028, lng: 129.745, tx: "11 дБм", antenna: "3 дБи", role: "Companion / CLIENT" },
+            { id: 3, name: "MeshPocket", type: "companion", lat: 62.040, lng: 129.710, tx: "10 дБм", antenna: "1 дБи", role: "Companion / TRACKER" }
+        ];
+
+        let currentProtocol = 0;
+        let map;
+        let markers = {};
+        let polylines = [];
+
+        function getDistance(lat1, lon1, lat2, lon2) {
+            const R = 6371;
+            const dLat = (lat2 - lat1) * Math.PI / 180;
+            const dLon = (lon2 - lon1) * Math.PI / 180;
+            const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLon/2)**2;
+            return (6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a))).toFixed(2);
+        }
+
+        function updateConnections() {
+            polylines.forEach(p => map.removeLayer(p));
+            polylines = [];
+
+            for (let i = 0; i < nodes.length; i++) {
+                for (let j = i + 1; j < nodes.length; j++) {
+                    const a = nodes[i];
+                    const b = nodes[j];
+
+                    if (currentProtocol === 1 && a.type === 'companion' && b.type === 'companion') continue;
+
+                    const dist = getDistance(a.lat, a.lng, b.lat, b.lng);
+
+                    const line = L.polyline([[a.lat, a.lng], [b.lat, b.lng]], {
+                        color: currentProtocol === 0 ? '#86efac' : '#facc15',
+                        weight: 4,
+                        opacity: 0.85
+                    }).addTo(map);
+
+                    const midLat = (a.lat + b.lat) / 2;
+                    const midLng = (a.lng + b.lng) / 2;
+
+                    const label = L.marker([midLat, midLng], {
+                        icon: L.divIcon({
+                            html: `<div style="background:rgba(15,23,42,0.95); color:#86efac; padding:2px 9px; border-radius:9999px; font-size:11px; font-weight:700; white-space:nowrap; box-shadow:0 2px 6px rgba(0,0,0,0.5)">${dist} км</div>`,
+                            className: '',
+                            iconSize: [80, 22],
+                            iconAnchor: [40, 11]
+                        })
+                    }).addTo(map);
+
+                    polylines.push(line, label);
+                }
+            }
+        }
+
+        function createCustomIcon(node) {
+            return L.divIcon({
+                html: `
+                    <div class="leaflet-custom-marker ${node.type === 'repeater' ? 'repeater-marker' : 'companion-marker'}">
+                        ${node.type === 'repeater' ? 'V4' : (node.name.includes('Pocket') ? 'MP' : 'T')}
+                    </div>
+                `,
+                className: 'leaflet-marker-icon',
+                iconSize: [56, 56],
+                iconAnchor: [28, 28]
+            });
+        }
+
+        function renderNodes() {
+            Object.values(markers).forEach(m => map.removeLayer(m));
+            markers = {};
+
+            nodes.forEach(node => {
+                const marker = L.marker([node.lat, node.lng], {
+                    icon: createCustomIcon(node),
+                    draggable: true,
+                    riseOnHover: true
+                }).addTo(map);
+
+                marker.on('dragend', (e) => {
+                    const pos = e.target.getLatLng();
+                    node.lat = pos.lat;
+                    node.lng = pos.lng;
+                    updateConnections();
+                });
+
+                marker.on('click', () => showNodeInfo(node));
+
+                markers[node.id] = marker;
+            });
+
+            updateConnections();
+        }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function showNodeInfo(node) {
+    const info = document.getElementById('node-info');
+    info.classList.remove('hidden');
+
+    let typeLabel = '';
+    let typeColor = '';
+
+    if (node.type === 'repeater') {
+        typeLabel = 'Heltec V4 Repeater';
+        typeColor = 'text-amber-400';
+    } else if (node.name.includes('MeshPocket')) {
+        typeLabel = 'MeshPocket';
+        typeColor = 'text-emerald-400';
+    } else if (node.name.includes('T114')) {
+        typeLabel = 'T114 Companion';
+        typeColor = 'text-emerald-400';
+    } else {
+        typeLabel = 'Companion';
+        typeColor = 'text-emerald-400';
+    }
+
+    info.innerHTML = `
+        <h3 class="font-bold text-xl mb-4">${node.name}</h3>
+
+        <div class="space-y-3 text-sm">
+
+            <div class="flex justify-between items-center">
+                <span class="text-zinc-400">Тип</span>
+                <span class="${typeColor} font-medium">
+                    ${typeLabel}
+                </span>
+            </div>
+
+            <div class="flex justify-between items-center">
+                <span class="text-zinc-400">TX</span>
+                <span>${node.tx}</span>
+            </div>
+
+            <div class="flex justify-between items-center">
+                <span class="text-zinc-400">Антенна</span>
+                <span>${node.antenna}</span>
+            </div>
+
+            <div class="flex justify-between items-center">
+                <span class="text-zinc-400">Роль</span>
+                <span class="text-emerald-400">
+                    ${node.role}
+                </span>
+            </div>
+
+            <div class="flex justify-between items-center">
+                <span class="text-zinc-400">Координаты</span>
+                <span>
+                    ${node.lat.toFixed(5)},
+                    ${node.lng.toFixed(5)}
+                </span>
+            </div>
+
+        </div>
+    `;
+}
+
+        function addNewNode() {
+
+    const choice = prompt(
+        'Выберите тип узла:\n\n' +
+        '1 - Heltec V4 Repeater\n' +
+        '2 - T114 Companion\n' +
+        '3 - MeshPocket'
+    );
+
+    if (!choice) return;
+
+    const center = map.getCenter();
+
+    let newNode;
+
+    switch (choice) {
+
+        case '1':
+            newNode = {
+                id: Date.now(),
+                name: `V4-Repeater-${nodes.length + 1}`,
+                type: 'repeater',
+                lat: center.lat + (Math.random() - 0.5) * 0.01,
+                lng: center.lng + (Math.random() - 0.5) * 0.02,
+                tx: '11 дБм',
+                antenna: '3 дБи',
+                role: 'Repeater / ROUTER'
+            };
+            break;
+
+        case '2':
+            newNode = {
+                id: Date.now(),
+                name: `T114-${nodes.length + 1}`,
+                type: 'companion',
+                lat: center.lat + (Math.random() - 0.5) * 0.01,
+                lng: center.lng + (Math.random() - 0.5) * 0.02,
+                tx: '11 дБм',
+                antenna: '3 дБи',
+                role: 'Companion / CLIENT'
+            };
+            break;
+
+        case '3':
+            newNode = {
+                id: Date.now(),
+                name: `MeshPocket-${nodes.length + 1}`,
+                type: 'companion',
+                lat: center.lat + (Math.random() - 0.5) * 0.01,
+                lng: center.lng + (Math.random() - 0.5) * 0.02,
+                tx: '10 дБм',
+                antenna: '1 дБи',
+                role: 'Companion / TRACKER'
+            };
+            break;
+
+        default:
+            alert('Неверный выбор');
+            return;
+    }
+
+    nodes.push(newNode);
+    renderNodes();
+}
+
+        function switchProtocol(mode) {
+            currentProtocol = mode;
+            document.getElementById('btn-meshtastic').classList.toggle('active', mode === 0);
+            document.getElementById('btn-meshcore').classList.toggle('active', mode === 1);
+            updateConnections();
+        }
+
+        function resetAll() {
+            nodes = [
+                { id: 1, name: "V4-Repeater", type: "repeater", lat: 62.035, lng: 129.720, tx: "11 дБм", antenna: "3 дБи", role: "Repeater / ROUTER" },
+                { id: 2, name: "T114-1", type: "companion", lat: 62.028, lng: 129.745, tx: "11 дБм", antenna: "3 дБи", role: "Companion / CLIENT" },
+                { id: 3, name: "MeshPocket", type: "companion", lat: 62.040, lng: 129.710, tx: "10 дБм", antenna: "1 дБи", role: "Companion / TRACKER" }
+            ];
+            renderNodes();
+        }
+
+        window.onload = function() {
+            map = L.map('map').setView([62.03, 129.73], 14);
+
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '&copy; OpenStreetMap'
+            }).addTo(map);
+
+            renderNodes();
+        };
+    </script>
+</body>
+</html>
